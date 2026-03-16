@@ -320,27 +320,29 @@ async def save_submission_stats(message: discord.Message, parsed: ParsedSubmissi
 
 
 def get_reporting_window(month: int, year: int) -> tuple[datetime, datetime]:
-    start = datetime(year, month, 28)
-    if month == 12:
-        end = datetime(year + 1, 1, 28)
+    end = datetime(year, month, 28)
+    if month == 1:
+        start = datetime(year - 1, 12, 28)
     else:
-        end = datetime(year, month + 1, 28)
+        start = datetime(year, month - 1, 28)
     return start, end
 
 
 def get_current_reporting_period(now: datetime) -> tuple[int, int]:
     if now.day >= 28:
-        return now.month, now.year
-    previous_month_anchor = now.replace(day=1) - timedelta(days=1)
-    return previous_month_anchor.month, previous_month_anchor.year
+        next_month_anchor = (now.replace(day=28) + timedelta(days=4)).replace(day=1)
+        return next_month_anchor.month, next_month_anchor.year
+    return now.month, now.year
 
 
-async def build_monthly_stats(guild: discord.Guild, month: int, year: int) -> str:
-    start_dt, end_dt = get_reporting_window(month, year)
+async def build_stats_for_period(
+    guild: discord.Guild,
+    start_dt: datetime,
+    end_dt_exclusive: datetime,
+    label: str,
+) -> str:
     start = start_dt.strftime("%Y-%m-%d")
-    end = end_dt.strftime("%Y-%m-%d")
-    display_end = (end_dt - timedelta(days=1)).strftime("%d/%m/%Y")
-
+    end = end_dt_exclusive.strftime("%Y-%m-%d")
     async with db_lock:
         with sqlite3.connect(DB_PATH) as connection:
             rows = connection.execute(
@@ -360,15 +362,10 @@ async def build_monthly_stats(guild: discord.Guild, month: int, year: int) -> st
             ).fetchall()
 
     if not rows:
-        return (
-            f"No approved activities found for the period "
-            f"{start_dt.strftime('%d/%m/%Y')} - {display_end}."
-        )
+        return f"No approved activities found for {label}."
 
     grand_total = 0
-    lines = [
-        f"Monthly statistics for {start_dt.strftime('%d/%m/%Y')} - {display_end}"
-    ]
+    lines = [f"Statistics for {label}"]
     for participant_id, patrols, roleplays, total in rows:
         member = guild.get_member(participant_id)
         display_name = member.display_name if member else f"User {participant_id}"
@@ -378,6 +375,13 @@ async def build_monthly_stats(guild: discord.Guild, month: int, year: int) -> st
         )
     lines.append(f"All activities total: {grand_total}")
     return "\n".join(lines)
+
+
+async def build_monthly_stats(guild: discord.Guild, month: int, year: int) -> str:
+    start_dt, end_dt = get_reporting_window(month, year)
+    display_end = (end_dt - timedelta(days=1)).strftime("%d/%m/%Y")
+    label = f"{start_dt.strftime('%d/%m/%Y')} - {display_end}"
+    return await build_stats_for_period(guild, start_dt, end_dt, label)
 
 
 @bot.event
@@ -422,7 +426,11 @@ async def on_message(message: discord.Message) -> None:
 
 
 @bot.command(name="showmonthly")
-async def show_monthly(ctx: commands.Context, month_year: str | None = None) -> None:
+async def show_monthly(
+    ctx: commands.Context,
+    first_arg: str | None = None,
+    second_arg: str | None = None,
+) -> None:
     if ctx.guild is None:
         await ctx.reply("This command can only be used inside a server.")
         return
@@ -431,20 +439,42 @@ async def show_monthly(ctx: commands.Context, month_year: str | None = None) -> 
         await ctx.reply("This command can only be used in the management channel.")
         return
 
-    if month_year:
+    if first_arg and second_arg:
         try:
-            month, year = month_year.split("/")
+            start_dt = datetime.strptime(first_arg, "%d/%m/%Y")
+            end_dt_inclusive = datetime.strptime(second_arg, "%d/%m/%Y")
+        except ValueError:
+            await ctx.reply(
+                "Use `!showmonthly`, `!showmonthly MM/YYYY`, or "
+                "`!showmonthly DD/MM/YYYY DD/MM/YYYY`."
+            )
+            return
+
+        if end_dt_inclusive < start_dt:
+            await ctx.reply("The end date must be the same as or later than the start date.")
+            return
+
+        end_dt_exclusive = end_dt_inclusive + timedelta(days=1)
+        label = f"{start_dt.strftime('%d/%m/%Y')} - {end_dt_inclusive.strftime('%d/%m/%Y')}"
+        report = await build_stats_for_period(ctx.guild, start_dt, end_dt_exclusive, label)
+    elif first_arg:
+        try:
+            month, year = first_arg.split("/")
             month_value = int(month)
             year_value = int(year)
             datetime(year_value, month_value, 28)
         except (ValueError, TypeError):
-            await ctx.reply("Use `!showmonthly` or `!showmonthly MM/YYYY`.")
+            await ctx.reply(
+                "Use `!showmonthly`, `!showmonthly MM/YYYY`, or "
+                "`!showmonthly DD/MM/YYYY DD/MM/YYYY`."
+            )
             return
+
+        report = await build_monthly_stats(ctx.guild, month_value, year_value)
     else:
         now = datetime.utcnow()
         month_value, year_value = get_current_reporting_period(now)
-
-    report = await build_monthly_stats(ctx.guild, month_value, year_value)
+        report = await build_monthly_stats(ctx.guild, month_value, year_value)
     await ctx.reply(f"```text\n{report}\n```")
 
 
