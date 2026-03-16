@@ -1,15 +1,17 @@
 import asyncio
+import io
 import os
 import re
 import sqlite3
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Iterable
 
 import discord
 from discord.ext import commands
 from dotenv import load_dotenv
+from PIL import Image
 
 
 load_dotenv()
@@ -22,6 +24,7 @@ ALLOWED_ACTIVITY_TYPES = {"PATROL": "Patrol", "RP": "RP"}
 SCREEN_LINK_RE = re.compile(r"^https?://\S+$", re.IGNORECASE)
 SOURCE_TEXT_CHANNEL_ID = int(os.getenv("SOURCE_TEXT_CHANNEL_ID", "0"))
 TARGET_TEXT_CHANNEL_ID = int(os.getenv("TARGET_TEXT_CHANNEL_ID", "0"))
+MANAGEMENT_CHANNEL_ID = int(os.getenv("MANAGEMENT_CHANNEL_ID", "0"))
 COMMAND_PREFIX = os.getenv("COMMAND_PREFIX", "!")
 
 
@@ -218,11 +221,71 @@ async def forward_submission(parsed: ParsedSubmission, message: discord.Message)
         await target_channel.send(file=discord.File(HEADER_IMAGE_PATH))
 
     if parsed.image_attachments:
-        files = [await attachment.to_file() for attachment in parsed.image_attachments]
-        await target_channel.send(build_forward_text(message, parsed), files=files)
+        merged_file = await build_combined_image_file(parsed.image_attachments)
+        await target_channel.send(build_forward_text(message, parsed), file=merged_file)
         return
 
     await target_channel.send(build_forward_text(message, parsed))
+
+
+async def build_combined_image_file(
+    attachments: list[discord.Attachment],
+) -> discord.File:
+    images: list[Image.Image] = []
+    for attachment in attachments:
+        image_bytes = await attachment.read()
+        with Image.open(io.BytesIO(image_bytes)) as opened_image:
+            images.append(opened_image.convert("RGB"))
+
+    collage = create_image_collage(images)
+    output = io.BytesIO()
+    collage.save(output, format="JPEG", quality=92)
+    output.seek(0)
+    collage.close()
+    for image in images:
+        image.close()
+    return discord.File(output, filename="activity_collage.jpg")
+
+
+def create_image_collage(images: list[Image.Image]) -> Image.Image:
+    if len(images) == 1:
+        return images[0].copy()
+
+    cell_width = 1200
+    cell_height = 675
+    padding = 20
+
+    if len(images) == 2:
+        cols, rows = 1, 2
+    else:
+        cols, rows = 2, 2
+
+    canvas_width = padding + cols * cell_width + (cols - 1) * padding + padding
+    canvas_height = padding + rows * cell_height + (rows - 1) * padding + padding
+    canvas = Image.new("RGB", (canvas_width, canvas_height), color=(28, 28, 28))
+
+    for index, image in enumerate(images):
+        if len(images) == 3 and index == 2:
+            row = 1
+            x = (canvas_width - cell_width) // 2
+        else:
+            row = index // cols
+            col = index % cols
+            x = padding + col * (cell_width + padding)
+        y = padding + row * (cell_height + padding)
+        fitted = fit_image_to_box(image, cell_width, cell_height)
+        paste_x = x + (cell_width - fitted.width) // 2
+        paste_y = y + (cell_height - fitted.height) // 2
+        canvas.paste(fitted, (paste_x, paste_y))
+        fitted.close()
+
+    return canvas
+
+
+def fit_image_to_box(image: Image.Image, width: int, height: int) -> Image.Image:
+    resized = image.copy()
+    resized.thumbnail((width, height), Image.Resampling.LANCZOS)
+    return resized
 
 
 async def save_submission_stats(message: discord.Message, parsed: ParsedSubmission) -> None:
@@ -256,12 +319,27 @@ async def save_submission_stats(message: discord.Message, parsed: ParsedSubmissi
             connection.commit()
 
 
-async def build_monthly_stats(guild: discord.Guild, month: int, year: int) -> str:
-    start = f"{year:04d}-{month:02d}-01"
+def get_reporting_window(month: int, year: int) -> tuple[datetime, datetime]:
+    start = datetime(year, month, 28)
     if month == 12:
-        end = f"{year + 1:04d}-01-01"
+        end = datetime(year + 1, 1, 28)
     else:
-        end = f"{year:04d}-{month + 1:02d}-01"
+        end = datetime(year, month + 1, 28)
+    return start, end
+
+
+def get_current_reporting_period(now: datetime) -> tuple[int, int]:
+    if now.day >= 28:
+        return now.month, now.year
+    previous_month_anchor = now.replace(day=1) - timedelta(days=1)
+    return previous_month_anchor.month, previous_month_anchor.year
+
+
+async def build_monthly_stats(guild: discord.Guild, month: int, year: int) -> str:
+    start_dt, end_dt = get_reporting_window(month, year)
+    start = start_dt.strftime("%Y-%m-%d")
+    end = end_dt.strftime("%Y-%m-%d")
+    display_end = (end_dt - timedelta(days=1)).strftime("%d/%m/%Y")
 
     async with db_lock:
         with sqlite3.connect(DB_PATH) as connection:
@@ -282,15 +360,23 @@ async def build_monthly_stats(guild: discord.Guild, month: int, year: int) -> st
             ).fetchall()
 
     if not rows:
-        return f"No approved activities found for {month:02d}/{year}."
+        return (
+            f"No approved activities found for the period "
+            f"{start_dt.strftime('%d/%m/%Y')} - {display_end}."
+        )
 
-    lines = [f"Monthly statistics for {month:02d}/{year}"]
+    grand_total = 0
+    lines = [
+        f"Monthly statistics for {start_dt.strftime('%d/%m/%Y')} - {display_end}"
+    ]
     for participant_id, patrols, roleplays, total in rows:
         member = guild.get_member(participant_id)
         display_name = member.display_name if member else f"User {participant_id}"
+        grand_total += total
         lines.append(
             f"{display_name}: Patrols {patrols}, RP {roleplays}, Total {total}"
         )
+    lines.append(f"All activities total: {grand_total}")
     return "\n".join(lines)
 
 
@@ -341,19 +427,22 @@ async def show_monthly(ctx: commands.Context, month_year: str | None = None) -> 
         await ctx.reply("This command can only be used inside a server.")
         return
 
+    if ctx.channel.id != MANAGEMENT_CHANNEL_ID:
+        await ctx.reply("This command can only be used in the management channel.")
+        return
+
     if month_year:
         try:
             month, year = month_year.split("/")
             month_value = int(month)
             year_value = int(year)
-            datetime(year_value, month_value, 1)
+            datetime(year_value, month_value, 28)
         except (ValueError, TypeError):
             await ctx.reply("Use `!showmonthly` or `!showmonthly MM/YYYY`.")
             return
     else:
         now = datetime.utcnow()
-        month_value = now.month
-        year_value = now.year
+        month_value, year_value = get_current_reporting_period(now)
 
     report = await build_monthly_stats(ctx.guild, month_value, year_value)
     await ctx.reply(f"```text\n{report}\n```")
@@ -367,6 +456,8 @@ def validate_environment() -> Iterable[str]:
         errors.append("SOURCE_TEXT_CHANNEL_ID is missing or invalid in .env")
     if TARGET_TEXT_CHANNEL_ID <= 0:
         errors.append("TARGET_TEXT_CHANNEL_ID is missing or invalid in .env")
+    if MANAGEMENT_CHANNEL_ID <= 0:
+        errors.append("MANAGEMENT_CHANNEL_ID is missing or invalid in .env")
     return errors
 
 
