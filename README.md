@@ -6,8 +6,9 @@ This bot validates activity submissions in one Discord server, reposts approved 
 
 - Validates activity posts in a source channel.
 - Accepts only `Patrol` and `RP` as activity types.
-- Requires at least one valid tagged participant.
+- Requires at least one participant name.
 - Rejects posts where tagged users do not exist in the source server.
+- Warns when plain-text participant names are used and allows manual confirmation with `✅`.
 - Accepts either:
   - `1` to `4` screenshot attachments, or
   - link(s) in the `Screens:` field.
@@ -141,19 +142,35 @@ Participants: @Roskou
 Screens: https://example.com/screenshot.png
 ```
 
+Mixed participant example:
+
+```text
+Activity Type: Patrol
+Date: 15/03/2026
+Participants: @Roskou validName
+Screens:
+```
+
 ## Validation Rules
 
 The bot checks the following before approving a post:
 
 - `Activity Type:` must be `Patrol` or `RP`
 - `Date:` must be in `DD/MM/YYYY`
-- `Participants:` must contain at least one real Discord mention
-- Every mentioned participant must exist in the source server
+- `Participants:` must contain at least one value
+- Every real Discord mention must point to a member that exists in the source server
 - Duplicate participants are rejected
 - Attachments must all be image files
 - Maximum `4` screenshots per post
 - A post must contain either screenshots or links, not both
 - If using `Screens:`, every value there must be a valid `http://` or `https://` link
+
+If a participant is written in plain text instead of as a real Discord mention:
+
+- The bot warns the author by DM
+- The bot adds `🔴` to the message to show it needs attention
+- The author can approve it manually by reacting to the original message with `✅`
+- The repost will keep the plain-text name exactly as written
 
 ## Approval and Rejection Behavior
 
@@ -167,6 +184,13 @@ If invalid:
 
 - The bot adds `🔴` to the original message
 - The bot DMs the author with the rejection reason
+
+If the post contains plain-text participant names:
+
+- The bot does not repost immediately
+- The bot sends a warning DM to the author
+- The author can react with `✅` on the original message to continue anyway
+- After that confirmation, the bot reposts the activity and stores it in stats
 
 ## Repost Behavior
 
@@ -198,6 +222,11 @@ Example:
   - `1` Patrol to participant A
   - `1` Patrol to participant B
   - `1` Patrol to participant C
+
+If a participant was entered as plain text and then manually confirmed:
+
+- The plain-text name is also counted in statistics
+- It is shown in reports using the written text, because it is not linked to a Discord member ID
 
 ## `!showmonthly` Command
 

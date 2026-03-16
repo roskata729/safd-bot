@@ -22,6 +22,7 @@ DB_PATH = BASE_DIR / "activity_stats.db"
 HEADER_IMAGE_PATH = BASE_DIR / "assets" / "activity.png"
 ALLOWED_ACTIVITY_TYPES = {"PATROL": "Patrol", "RP": "RP"}
 SCREEN_LINK_RE = re.compile(r"^https?://\S+$", re.IGNORECASE)
+MENTION_RE = re.compile(r"^<@!?(\d+)>$")
 SOURCE_TEXT_CHANNEL_ID = int(os.getenv("SOURCE_TEXT_CHANNEL_ID", "0"))
 TARGET_TEXT_CHANNEL_ID = int(os.getenv("TARGET_TEXT_CHANNEL_ID", "0"))
 MANAGEMENT_CHANNEL_ID = int(os.getenv("MANAGEMENT_CHANNEL_ID", "0"))
@@ -36,6 +37,14 @@ intents.messages = True
 
 bot = commands.Bot(command_prefix=COMMAND_PREFIX, intents=intents, help_command=None)
 db_lock = asyncio.Lock()
+pending_confirmations: dict[int, "PendingConfirmation"] = {}
+
+
+@dataclass
+class ParticipantEntry:
+    participant_id: int | None
+    label: str
+    output_text: str
 
 
 @dataclass
@@ -43,29 +52,92 @@ class ParsedSubmission:
     activity_type: str
     date_text: str
     activity_date: datetime
-    participants: list[discord.Member]
+    participants: list[ParticipantEntry]
+    has_unverified_participants: bool
+    unverified_labels: list[str]
     screen_links: list[str]
     image_attachments: list[discord.Attachment]
 
 
+@dataclass
+class PendingConfirmation:
+    author_id: int
+    source_channel_id: int
+    parsed: ParsedSubmission
+
+
 def init_db() -> None:
     with sqlite3.connect(DB_PATH) as connection:
-        connection.execute(
-            """
-            CREATE TABLE IF NOT EXISTS activity_submissions (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                guild_id INTEGER NOT NULL,
-                channel_id INTEGER NOT NULL,
-                source_message_id INTEGER NOT NULL,
-                author_id INTEGER NOT NULL,
-                activity_type TEXT NOT NULL,
-                activity_date TEXT NOT NULL,
-                participant_id INTEGER NOT NULL,
-                created_at TEXT NOT NULL,
-                UNIQUE(source_message_id, participant_id)
+        columns = {
+            row[1] for row in connection.execute("PRAGMA table_info(activity_submissions)").fetchall()
+        }
+        if not columns:
+            connection.execute(
+                """
+                CREATE TABLE activity_submissions (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    guild_id INTEGER NOT NULL,
+                    channel_id INTEGER NOT NULL,
+                    source_message_id INTEGER NOT NULL,
+                    author_id INTEGER NOT NULL,
+                    activity_type TEXT NOT NULL,
+                    activity_date TEXT NOT NULL,
+                    participant_id INTEGER,
+                    participant_label TEXT NOT NULL,
+                    participant_key TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    UNIQUE(source_message_id, participant_key)
+                )
+                """
             )
-            """
-        )
+        elif "participant_label" not in columns or "participant_key" not in columns:
+            connection.execute(
+                """
+                CREATE TABLE activity_submissions_new (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    guild_id INTEGER NOT NULL,
+                    channel_id INTEGER NOT NULL,
+                    source_message_id INTEGER NOT NULL,
+                    author_id INTEGER NOT NULL,
+                    activity_type TEXT NOT NULL,
+                    activity_date TEXT NOT NULL,
+                    participant_id INTEGER,
+                    participant_label TEXT NOT NULL,
+                    participant_key TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    UNIQUE(source_message_id, participant_key)
+                )
+                """
+            )
+            connection.execute(
+                """
+                INSERT INTO activity_submissions_new (
+                    guild_id,
+                    channel_id,
+                    source_message_id,
+                    author_id,
+                    activity_type,
+                    activity_date,
+                    participant_id,
+                    participant_label,
+                    participant_key,
+                    created_at
+                )
+                SELECT guild_id,
+                       channel_id,
+                       source_message_id,
+                       author_id,
+                       activity_type,
+                       activity_date,
+                       participant_id,
+                       CAST(participant_id AS TEXT),
+                       'id:' || participant_id,
+                       created_at
+                FROM activity_submissions
+                """
+            )
+            connection.execute("DROP TABLE activity_submissions")
+            connection.execute("ALTER TABLE activity_submissions_new RENAME TO activity_submissions")
         connection.commit()
 
 
@@ -110,29 +182,55 @@ def parse_submission_body(message: discord.Message) -> ParsedSubmission:
     if not participants_raw:
         raise ValueError("Missing `Participants:` line.")
 
-    mention_ids = [int(member_id) for member_id in re.findall(r"<@!?(\d+)>", participants_raw)]
-    if not mention_ids:
-        raise ValueError("Participants must contain at least one valid server mention.")
+    raw_participants = [token.strip(",") for token in participants_raw.split() if token.strip(",")]
+    if not raw_participants:
+        raise ValueError("Participants must contain at least one name or mention.")
 
-    members: list[discord.Member] = []
+    participants: list[ParticipantEntry] = []
     invalid_mentions: list[str] = []
+    unverified_labels: list[str] = []
+    seen_keys: set[str] = set()
 
-    for member_id in mention_ids:
-        member = message.guild.get_member(member_id)
-        if member is None:
-            invalid_mentions.append(f"<@{member_id}>")
+    for token in raw_participants:
+        mention_match = MENTION_RE.fullmatch(token)
+        if mention_match:
+            member_id = int(mention_match.group(1))
+            member = message.guild.get_member(member_id)
+            if member is None:
+                invalid_mentions.append(token)
+                continue
+            participant_key = f"id:{member.id}"
+            if participant_key in seen_keys:
+                raise ValueError("Participants contains duplicate names. List each participant once.")
+            seen_keys.add(participant_key)
+            participants.append(
+                ParticipantEntry(
+                    participant_id=member.id,
+                    label=member.display_name,
+                    output_text=member.mention,
+                )
+            )
             continue
-        members.append(member)
+
+        normalized_label = token.strip()
+        participant_key = f"name:{normalized_label.casefold()}"
+        if participant_key in seen_keys:
+            raise ValueError("Participants contains duplicate names. List each participant once.")
+        seen_keys.add(participant_key)
+        unverified_labels.append(normalized_label)
+        participants.append(
+            ParticipantEntry(
+                participant_id=None,
+                label=normalized_label,
+                output_text=normalized_label,
+            )
+        )
 
     if invalid_mentions:
         raise ValueError(
             "These mentions are not valid members of this server: "
             + ", ".join(invalid_mentions)
         )
-
-    unique_members = list(dict.fromkeys(members))
-    if len(unique_members) != len(mention_ids):
-        raise ValueError("Participants contains duplicate mentions. Mention each person once.")
 
     screens_raw = fields.get("screens", "")
     screen_links = [item for item in screens_raw.split() if SCREEN_LINK_RE.match(item)]
@@ -158,7 +256,9 @@ def parse_submission_body(message: discord.Message) -> ParsedSubmission:
         activity_type=activity_type,
         date_text=date_text,
         activity_date=activity_date,
-        participants=unique_members,
+        participants=participants,
+        has_unverified_participants=bool(unverified_labels),
+        unverified_labels=unverified_labels,
         screen_links=screen_links,
         image_attachments=image_attachments,
     )
@@ -172,7 +272,7 @@ def is_image(attachment: discord.Attachment) -> bool:
 
 
 def build_forward_text(message: discord.Message, parsed: ParsedSubmission) -> str:
-    participant_mentions = " ".join(member.mention for member in parsed.participants)
+    participant_mentions = " ".join(participant.output_text for participant in parsed.participants)
     lines = [
         f"Activity Type: {parsed.activity_type}",
         f"Date: {parsed.date_text}",
@@ -204,6 +304,20 @@ async def deny_submission(message: discord.Message, reason: str) -> None:
             "Screens: https://example.com/screen.png\n"
             "Or attach 1-4 screenshots to the message."
         )
+    except discord.Forbidden:
+        pass
+
+
+async def warn_unverified_submission(message: discord.Message, parsed: ParsedSubmission) -> None:
+    await add_reaction_safely(message, "\U0001F534")
+    warning = (
+        "Your activity submission contains participant names that are not real Discord mentions.\n"
+        f"Unverified participant names: {', '.join(parsed.unverified_labels)}\n\n"
+        "If you want to post it anyway, react to your original message with ✅.\n"
+        "Tagged participants will still be validated normally. Plain-text names will be posted as written."
+    )
+    try:
+        await message.author.send(warning)
     except discord.Forbidden:
         pass
 
@@ -292,6 +406,11 @@ async def save_submission_stats(message: discord.Message, parsed: ParsedSubmissi
     async with db_lock:
         with sqlite3.connect(DB_PATH) as connection:
             for participant in parsed.participants:
+                participant_key = (
+                    f"id:{participant.participant_id}"
+                    if participant.participant_id is not None
+                    else f"name:{participant.label.casefold()}"
+                )
                 connection.execute(
                     """
                     INSERT OR REPLACE INTO activity_submissions (
@@ -302,8 +421,10 @@ async def save_submission_stats(message: discord.Message, parsed: ParsedSubmissi
                         activity_type,
                         activity_date,
                         participant_id,
+                        participant_label,
+                        participant_key,
                         created_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         message.guild.id,
@@ -312,7 +433,9 @@ async def save_submission_stats(message: discord.Message, parsed: ParsedSubmissi
                         message.author.id,
                         parsed.activity_type,
                         parsed.activity_date.strftime("%Y-%m-%d"),
-                        participant.id,
+                        participant.participant_id,
+                        participant.label,
+                        participant_key,
                         datetime.utcnow().isoformat(timespec="seconds"),
                     ),
                 )
@@ -348,6 +471,7 @@ async def build_stats_for_period(
             rows = connection.execute(
                 """
                 SELECT participant_id,
+                       participant_label,
                        SUM(CASE WHEN activity_type = 'Patrol' THEN 1 ELSE 0 END) AS patrols,
                        SUM(CASE WHEN activity_type = 'RP' THEN 1 ELSE 0 END) AS roleplays,
                        COUNT(*) AS total
@@ -355,8 +479,11 @@ async def build_stats_for_period(
                 WHERE guild_id = ?
                   AND activity_date >= ?
                   AND activity_date < ?
-                GROUP BY participant_id
-                ORDER BY total DESC, patrols DESC, roleplays DESC, participant_id ASC
+                GROUP BY CASE
+                             WHEN participant_id IS NOT NULL THEN 'id:' || participant_id
+                             ELSE 'name:' || participant_label
+                         END
+                ORDER BY total DESC, patrols DESC, roleplays DESC, participant_label COLLATE NOCASE ASC
                 """,
                 (guild.id, start, end),
             ).fetchall()
@@ -366,9 +493,9 @@ async def build_stats_for_period(
 
     grand_total = 0
     lines = [f"Statistics for {label}"]
-    for participant_id, patrols, roleplays, total in rows:
-        member = guild.get_member(participant_id)
-        display_name = member.display_name if member else f"User {participant_id}"
+    for participant_id, participant_label, patrols, roleplays, total in rows:
+        member = guild.get_member(participant_id) if participant_id is not None else None
+        display_name = member.display_name if member else participant_label
         grand_total += total
         lines.append(
             f"{display_name}: Patrols {patrols}, RP {roleplays}, Total {total}"
@@ -412,6 +539,15 @@ async def on_message(message: discord.Message) -> None:
         await deny_submission(message, str(exc))
         return
 
+    if parsed.has_unverified_participants:
+        pending_confirmations[message.id] = PendingConfirmation(
+            author_id=message.author.id,
+            source_channel_id=message.channel.id,
+            parsed=parsed,
+        )
+        await warn_unverified_submission(message, parsed)
+        return
+
     try:
         await forward_submission(parsed, message)
         await save_submission_stats(message, parsed)
@@ -422,6 +558,47 @@ async def on_message(message: discord.Message) -> None:
         )
         return
 
+    await approve_submission(message)
+
+
+@bot.event
+async def on_raw_reaction_add(payload: discord.RawReactionActionEvent) -> None:
+    if bot.user and payload.user_id == bot.user.id:
+        return
+
+    if str(payload.emoji) != "\u2705":
+        return
+
+    pending = pending_confirmations.get(payload.message_id)
+    if pending is None:
+        return
+
+    if payload.user_id != pending.author_id or payload.channel_id != pending.source_channel_id:
+        return
+
+    channel = bot.get_channel(payload.channel_id)
+    if not isinstance(channel, discord.TextChannel):
+        pending_confirmations.pop(payload.message_id, None)
+        return
+
+    try:
+        message = await channel.fetch_message(payload.message_id)
+    except discord.HTTPException:
+        pending_confirmations.pop(payload.message_id, None)
+        return
+
+    try:
+        await forward_submission(pending.parsed, message)
+        await save_submission_stats(message, pending.parsed)
+    except Exception as exc:
+        await deny_submission(
+            message,
+            f"Internal bot error while forwarding the submission: {exc}",
+        )
+        pending_confirmations.pop(payload.message_id, None)
+        return
+
+    pending_confirmations.pop(payload.message_id, None)
     await approve_submission(message)
 
 
