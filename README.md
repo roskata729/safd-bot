@@ -53,7 +53,10 @@ pip install -r requirements.txt
 - [bot.py](r:/Projects/discordBot/bot.py): Main bot logic
 - [requirements.txt](r:/Projects/discordBot/requirements.txt): Python dependencies
 - [.env](r:/Projects/discordBot/.env): Runtime configuration
+- [.env.example](r:/Projects/discordBot/.env.example): Safe environment template
 - [assets/activity.png](r:/Projects/discordBot/assets/activity.png): Header image sent before reposts
+- [deploy/setup_oracle.sh](r:/Projects/discordBot/deploy/setup_oracle.sh): Ubuntu setup script for Oracle Cloud
+- [deploy/discord-activity-bot.service](r:/Projects/discordBot/deploy/discord-activity-bot.service): `systemd` service template
 - `activity_stats.db`: SQLite database created automatically after first run
 
 ## Discord Setup
@@ -112,6 +115,12 @@ Variable meanings:
 - `MANAGEMENT_CHANNEL_ID`: Channel where `!showmonthly` is allowed
 - `COMMAND_PREFIX`: Prefix for text commands, currently `!`
 
+You can create your local `.env` from the template:
+
+```powershell
+Copy-Item .env.example .env
+```
+
 ## Run the Bot
 
 ```powershell
@@ -119,6 +128,104 @@ python bot.py
 ```
 
 If startup succeeds, the bot logs in and creates `activity_stats.db` automatically.
+
+## Oracle Cloud Deployment
+
+This bot is a long-running `discord.py` process. The simplest free deployment is an Oracle Cloud Always Free Ubuntu VM with `systemd`.
+
+### 1. Create the VM
+
+Create an Ubuntu VM in Oracle Cloud. Use an Always Free shape if available.
+
+Open port `22` in Oracle Cloud so you can SSH into the machine.
+
+### 2. Connect to the VM
+
+From your local machine:
+
+```bash
+ssh ubuntu@YOUR_VM_PUBLIC_IP
+```
+
+### 3. Clone the repository
+
+On the VM:
+
+```bash
+git clone https://github.com/roskata729/safd-bot.git ~/discordBot
+cd ~/discordBot
+```
+
+### 4. Run the setup script
+
+```bash
+chmod +x deploy/setup_oracle.sh
+./deploy/setup_oracle.sh
+```
+
+This installs Python dependencies, creates `.venv`, and copies `.env.example` to `.env` if needed.
+
+### 5. Configure the bot
+
+Edit `.env` on the VM:
+
+```bash
+nano ~/discordBot/.env
+```
+
+Fill in:
+
+- `DISCORD_BOT_TOKEN`
+- `SOURCE_TEXT_CHANNEL_ID`
+- `TARGET_TEXT_CHANNEL_ID`
+- `MANAGEMENT_CHANNEL_ID`
+- `COMMAND_PREFIX`
+
+### 6. Install the systemd service
+
+Copy the service template into `systemd`:
+
+```bash
+sudo cp deploy/discord-activity-bot.service /etc/systemd/system/discord-activity-bot.service
+```
+
+If your VM user or project path is different from `ubuntu` and `/home/ubuntu/discordBot`, edit the service file first:
+
+```bash
+nano deploy/discord-activity-bot.service
+```
+
+Check these lines:
+
+- `User=ubuntu`
+- `Group=ubuntu`
+- `WorkingDirectory=/home/ubuntu/discordBot`
+- `EnvironmentFile=/home/ubuntu/discordBot/.env`
+- `ExecStart=/home/ubuntu/discordBot/.venv/bin/python /home/ubuntu/discordBot/bot.py`
+
+### 7. Start the bot on boot
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable --now discord-activity-bot
+```
+
+### 8. Check logs
+
+```bash
+sudo systemctl status discord-activity-bot
+journalctl -u discord-activity-bot -f
+```
+
+### 9. Updating the bot later
+
+```bash
+cd ~/discordBot
+git pull
+. .venv/bin/activate
+pip install -r requirements.txt
+sudo systemctl restart discord-activity-bot
+```
 
 ## Submission Format
 
