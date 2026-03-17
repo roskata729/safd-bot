@@ -326,10 +326,33 @@ async def approve_submission(message: discord.Message) -> None:
     await add_reaction_safely(message, "\u2705")
 
 
-async def forward_submission(parsed: ParsedSubmission, message: discord.Message) -> None:
+async def resolve_target_channel() -> discord.TextChannel | discord.Thread:
     target_channel = bot.get_channel(TARGET_TEXT_CHANNEL_ID)
-    if not isinstance(target_channel, discord.TextChannel):
-        raise RuntimeError("Target channel not found. Check TARGET_TEXT_CHANNEL_ID.")
+    if isinstance(target_channel, (discord.TextChannel, discord.Thread)):
+        return target_channel
+
+    try:
+        fetched_channel = await bot.fetch_channel(TARGET_TEXT_CHANNEL_ID)
+    except discord.HTTPException as exc:
+        raise RuntimeError(
+            "Target channel could not be fetched. Check TARGET_TEXT_CHANNEL_ID and bot access."
+        ) from exc
+
+    if isinstance(fetched_channel, (discord.TextChannel, discord.Thread)):
+        return fetched_channel
+
+    if isinstance(fetched_channel, discord.ForumChannel):
+        raise RuntimeError(
+            "TARGET_TEXT_CHANNEL_ID points to a forum channel. Use the ID of a specific post/thread inside that forum."
+        )
+
+    raise RuntimeError(
+        "Target channel is not a text channel or thread. Check TARGET_TEXT_CHANNEL_ID."
+    )
+
+
+async def forward_submission(parsed: ParsedSubmission, message: discord.Message) -> None:
+    target_channel = await resolve_target_channel()
 
     if HEADER_IMAGE_PATH.exists():
         await target_channel.send(file=discord.File(HEADER_IMAGE_PATH))
