@@ -489,7 +489,7 @@ RP with optional story:
 Activity Type: RP
 Date: 17/03/2026
 Participants: @Roskou
-Story: Responded to a civilian disturbance and completed a formal warning.
+Story: Responsed to a fire
 Screens:
 ```
 
