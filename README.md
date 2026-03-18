@@ -470,7 +470,7 @@ Link-based example:
 Activity Type: RP
 Date: 15/03/2026
 Participants: @Roskou
-Story: Fire extinguished successfully without incidents.
+Story: Fire extinguished successfully without any incidents.
 Screens: https://example.com/screenshot.png
 ```
 
