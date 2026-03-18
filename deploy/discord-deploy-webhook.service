@@ -1,0 +1,16 @@
+[Unit]
+Description=Discord Bot Deploy Webhook
+After=network.target
+
+[Service]
+Type=simple
+User=ubuntu
+Group=ubuntu
+WorkingDirectory=/home/ubuntu/discordBot
+EnvironmentFile=/home/ubuntu/discordBot/.env
+ExecStart=/home/ubuntu/discordBot/.venv/bin/python /home/ubuntu/discordBot/deploy_webhook.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

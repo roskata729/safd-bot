@@ -1,5 +1,6 @@
 import asyncio
 import io
+import json
 import os
 import re
 import sqlite3
@@ -20,12 +21,16 @@ load_dotenv()
 BASE_DIR = Path(__file__).resolve().parent
 DB_PATH = BASE_DIR / "activity_stats.db"
 HEADER_IMAGE_PATH = BASE_DIR / "assets" / "activity.png"
+PENDING_CHANGELOG_PATH = BASE_DIR / "pending_changelog.json"
 ALLOWED_ACTIVITY_TYPES = {"PATROL": "Patrol", "RP": "RP"}
 SCREEN_LINK_RE = re.compile(r"^https?://\S+$", re.IGNORECASE)
 MENTION_RE = re.compile(r"^<@!?(\d+)>$")
 SOURCE_TEXT_CHANNEL_ID = int(os.getenv("SOURCE_TEXT_CHANNEL_ID", "0"))
 TARGET_TEXT_CHANNEL_ID = int(os.getenv("TARGET_TEXT_CHANNEL_ID", "0"))
 MANAGEMENT_CHANNEL_ID = int(os.getenv("MANAGEMENT_CHANNEL_ID", "0"))
+CHANGELOG_CHANNEL_ID = int(os.getenv("CHANGELOG_CHANNEL_ID", "0"))
+GITHUB_REPOSITORY = os.getenv("GITHUB_REPOSITORY", "").strip()
+GITHUB_BRANCH = os.getenv("GITHUB_BRANCH", "main").strip() or "main"
 COMMAND_PREFIX = os.getenv("COMMAND_PREFIX", "!")
 
 
@@ -68,6 +73,14 @@ class PendingConfirmation:
 
 def init_db() -> None:
     with sqlite3.connect(DB_PATH) as connection:
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS bot_state (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            )
+            """
+        )
         columns = {
             row[1] for row in connection.execute("PRAGMA table_info(activity_submissions)").fetchall()
         }
@@ -146,6 +159,28 @@ def normalize_activity_type(raw_value: str) -> str | None:
     if compact in ALLOWED_ACTIVITY_TYPES:
         return ALLOWED_ACTIVITY_TYPES[compact]
     return None
+
+
+def get_state_value(key: str) -> str | None:
+    with sqlite3.connect(DB_PATH) as connection:
+        row = connection.execute(
+            "SELECT value FROM bot_state WHERE key = ?",
+            (key,),
+        ).fetchone()
+    return row[0] if row else None
+
+
+def set_state_value(key: str, value: str) -> None:
+    with sqlite3.connect(DB_PATH) as connection:
+        connection.execute(
+            """
+            INSERT INTO bot_state (key, value)
+            VALUES (?, ?)
+            ON CONFLICT(key) DO UPDATE SET value = excluded.value
+            """,
+            (key, value),
+        )
+        connection.commit()
 
 
 def parse_submission_body(message: discord.Message) -> ParsedSubmission:
@@ -351,6 +386,29 @@ async def resolve_target_channel() -> discord.TextChannel | discord.Thread:
     )
 
 
+async def resolve_changelog_channel() -> discord.TextChannel | discord.Thread:
+    if CHANGELOG_CHANNEL_ID <= 0:
+        raise RuntimeError("CHANGELOG_CHANNEL_ID is missing or invalid in .env")
+
+    target_channel = bot.get_channel(CHANGELOG_CHANNEL_ID)
+    if isinstance(target_channel, (discord.TextChannel, discord.Thread)):
+        return target_channel
+
+    try:
+        fetched_channel = await bot.fetch_channel(CHANGELOG_CHANNEL_ID)
+    except discord.HTTPException as exc:
+        raise RuntimeError(
+            "Changelog channel could not be fetched. Check CHANGELOG_CHANNEL_ID and bot access."
+        ) from exc
+
+    if isinstance(fetched_channel, (discord.TextChannel, discord.Thread)):
+        return fetched_channel
+
+    raise RuntimeError(
+        "Changelog channel is not a text channel or thread. Check CHANGELOG_CHANNEL_ID."
+    )
+
+
 async def forward_submission(parsed: ParsedSubmission, message: discord.Message) -> None:
     target_channel = await resolve_target_channel()
 
@@ -534,9 +592,41 @@ async def build_monthly_stats(guild: discord.Guild, month: int, year: int) -> st
     return await build_stats_for_period(guild, start_dt, end_dt, label)
 
 
+def load_pending_changelog() -> list[dict[str, str]]:
+    if not PENDING_CHANGELOG_PATH.exists():
+        return []
+
+    payload = json.loads(PENDING_CHANGELOG_PATH.read_text(encoding="utf-8"))
+    commits = payload.get("commits", [])
+    return commits if isinstance(commits, list) else []
+
+
+async def post_pending_changelog() -> None:
+    if CHANGELOG_CHANNEL_ID <= 0:
+        return
+
+    commits = load_pending_changelog()
+    if not commits:
+        return
+
+    changelog_channel = await resolve_changelog_channel()
+    for commit in commits:
+        await changelog_channel.send(
+            f"**{commit['message']}**\n"
+            f"`{commit['short_sha']}` by {commit['author']}\n"
+            f"{commit['url']}"
+        )
+
+    PENDING_CHANGELOG_PATH.unlink(missing_ok=True)
+
+
 @bot.event
 async def on_ready() -> None:
     init_db()
+    try:
+        await post_pending_changelog()
+    except Exception as exc:
+        print(f"Changelog post error: {exc}")
     print(f"Logged in as {bot.user} ({bot.user.id})")
 
 
@@ -688,6 +778,10 @@ def validate_environment() -> Iterable[str]:
         errors.append("TARGET_TEXT_CHANNEL_ID is missing or invalid in .env")
     if MANAGEMENT_CHANNEL_ID <= 0:
         errors.append("MANAGEMENT_CHANNEL_ID is missing or invalid in .env")
+    if CHANGELOG_CHANNEL_ID > 0 and not GITHUB_REPOSITORY:
+        errors.append("GITHUB_REPOSITORY is required when CHANGELOG_CHANNEL_ID is set")
+    if GITHUB_REPOSITORY and CHANGELOG_CHANNEL_ID <= 0:
+        errors.append("CHANGELOG_CHANNEL_ID is required when GITHUB_REPOSITORY is set")
     return errors
 
 

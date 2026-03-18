@@ -3,4 +3,5 @@
 __pycache__/
 *.pyc
 activity_stats.db
+pending_changelog.json
 __pycache__/bot.cpython-314.pyc

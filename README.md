@@ -18,6 +18,7 @@ This bot validates activity submissions in one Discord server, reposts approved 
 - Sends the header image first, then reposts one combined image made from all attached screenshots.
 - Stores approved submissions in SQLite for reporting.
 - Provides `!showmonthly` stats in a management channel only.
+- Can post new GitHub commit messages into a changelog Discord channel.
 
 ## Requirements
 
@@ -58,6 +59,9 @@ pip install -r requirements.txt
 - [deploy/setup_oracle.sh](r:/Projects/discordBot/deploy/setup_oracle.sh): Ubuntu setup script for Oracle Cloud
 - [deploy/setup_gcp.sh](r:/Projects/discordBot/deploy/setup_gcp.sh): Ubuntu setup script for Google Cloud VM
 - [deploy/discord-activity-bot.service](r:/Projects/discordBot/deploy/discord-activity-bot.service): `systemd` service template
+- [deploy/discord-deploy-webhook.service](r:/Projects/discordBot/deploy/discord-deploy-webhook.service): `systemd` service for GitHub webhooks
+- [deploy/deploy_on_push.sh](r:/Projects/discordBot/deploy/deploy_on_push.sh): Deploy script triggered by GitHub push
+- [deploy_webhook.py](r:/Projects/discordBot/deploy_webhook.py): Webhook listener that starts deployment on push
 - `activity_stats.db`: SQLite database created automatically after first run
 
 ## Discord Setup
@@ -105,6 +109,13 @@ DISCORD_BOT_TOKEN=YOUR_NEW_BOT_TOKEN
 SOURCE_TEXT_CHANNEL_ID=123456789012345678
 TARGET_TEXT_CHANNEL_ID=987654321098765432
 MANAGEMENT_CHANNEL_ID=555555555555555555
+CHANGELOG_CHANNEL_ID=666666666666666666
+GITHUB_REPOSITORY=roskata729/safd-bot
+GITHUB_BRANCH=main
+GITHUB_WEBHOOK_SECRET=PUT_A_RANDOM_WEBHOOK_SECRET_HERE
+DEPLOY_WEBHOOK_HOST=0.0.0.0
+DEPLOY_WEBHOOK_PORT=9000
+BOT_SERVICE_NAME=discord-activity-bot
 COMMAND_PREFIX=!
 ```
 
@@ -114,7 +125,16 @@ Variable meanings:
 - `SOURCE_TEXT_CHANNEL_ID`: Channel where users submit activities
 - `TARGET_TEXT_CHANNEL_ID`: Channel in the second server where approved posts are reposted
 - `MANAGEMENT_CHANNEL_ID`: Channel where `!showmonthly` is allowed
+- `CHANGELOG_CHANNEL_ID`: Channel where new commit messages should be posted
+- `GITHUB_REPOSITORY`: GitHub repository in `owner/repo` format
+- `GITHUB_BRANCH`: Branch to watch for new commits, usually `main`
+- `GITHUB_WEBHOOK_SECRET`: Shared secret used to validate GitHub webhook requests
+- `DEPLOY_WEBHOOK_HOST`: Host interface for the webhook listener, usually `0.0.0.0`
+- `DEPLOY_WEBHOOK_PORT`: Port used by the webhook listener
+- `BOT_SERVICE_NAME`: Name of the bot `systemd` service
 - `COMMAND_PREFIX`: Prefix for text commands, currently `!`
+
+The changelog feature is optional. It becomes active only when both `CHANGELOG_CHANNEL_ID` and `GITHUB_REPOSITORY` are set.
 
 You can create your local `.env` from the template:
 
@@ -129,6 +149,105 @@ python bot.py
 ```
 
 If startup succeeds, the bot logs in and creates `activity_stats.db` automatically.
+
+## Auto Deploy And Changelog
+
+This project can deploy itself on every GitHub push by using a GitHub webhook on your VM.
+
+Flow:
+
+1. You push to GitHub
+2. GitHub sends a webhook request to your VM
+3. The webhook service starts the deploy script
+4. The deploy script stops the bot, pulls the latest code, installs dependencies, and starts the bot again
+5. The pushed commit messages are posted into the changelog channel after the bot comes back online
+
+Required `.env` values:
+
+- `CHANGELOG_CHANNEL_ID`
+- `GITHUB_REPOSITORY`
+- `GITHUB_BRANCH`
+- `GITHUB_WEBHOOK_SECRET`
+- `DEPLOY_WEBHOOK_PORT`
+- `BOT_SERVICE_NAME`
+
+Webhook endpoint:
+
+```text
+http://YOUR_VM_PUBLIC_IP:9000/github-webhook
+```
+
+Make sure your VM firewall allows inbound traffic on `DEPLOY_WEBHOOK_PORT`.
+
+### GitHub Webhook Setup
+
+In your GitHub repository:
+
+1. Open `Settings`
+2. Open `Webhooks`
+3. Click `Add webhook`
+4. Set `Payload URL` to:
+   `http://YOUR_VM_PUBLIC_IP:9000/github-webhook`
+5. Set `Content type` to:
+   `application/json`
+6. Set `Secret` to the same value as `GITHUB_WEBHOOK_SECRET` in `.env`
+7. Choose:
+   `Just the push event`
+
+### VM Setup For Webhook Deploys
+
+Start by making sure the normal bot service already works.
+
+Install the webhook service:
+
+```bash
+sudo cp deploy/discord-deploy-webhook.service /etc/systemd/system/discord-deploy-webhook.service
+sudo nano /etc/systemd/system/discord-deploy-webhook.service
+```
+
+If your VM username or path is not `ubuntu` and `/home/ubuntu/discordBot`, update:
+
+- `User=ubuntu`
+- `Group=ubuntu`
+- `WorkingDirectory=/home/ubuntu/discordBot`
+- `EnvironmentFile=/home/ubuntu/discordBot/.env`
+- `ExecStart=/home/ubuntu/discordBot/.venv/bin/python /home/ubuntu/discordBot/deploy_webhook.py`
+
+Then enable it:
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable --now discord-deploy-webhook
+sudo systemctl status discord-deploy-webhook
+```
+
+### Sudoers Requirement
+
+The webhook service needs permission to restart the bot service without prompting for a password.
+
+Run:
+
+```bash
+sudo visudo
+```
+
+Add this line, replacing the username if needed:
+
+```text
+ubuntu ALL=NOPASSWD: /bin/systemctl stop discord-activity-bot, /bin/systemctl start discord-activity-bot
+```
+
+If your service name is different, update that line to match `BOT_SERVICE_NAME`.
+
+### Changelog Message Format
+
+Each pushed commit is posted like this:
+
+```text
+Add Google Cloud deployment setup
+97ba87d by Roskou
+https://github.com/roskata729/safd-bot/commit/...
+```
 
 ## Oracle Cloud Deployment
 
