@@ -60,6 +60,7 @@ class ParsedSubmission:
     participants: list[ParticipantEntry]
     has_unverified_participants: bool
     unverified_labels: list[str]
+    story: str | None
     screen_links: list[str]
     image_attachments: list[discord.Attachment]
 
@@ -267,6 +268,10 @@ def parse_submission_body(message: discord.Message) -> ParsedSubmission:
             + ", ".join(invalid_mentions)
         )
 
+    story = fields.get("story")
+    if story and activity_type != "RP":
+        raise ValueError("`Story:` is only allowed when Activity Type is `RP`.")
+
     screens_raw = fields.get("screens", "")
     screen_links = [item for item in screens_raw.split() if SCREEN_LINK_RE.match(item)]
     image_attachments = [attachment for attachment in message.attachments if is_image(attachment)]
@@ -294,6 +299,7 @@ def parse_submission_body(message: discord.Message) -> ParsedSubmission:
         participants=participants,
         has_unverified_participants=bool(unverified_labels),
         unverified_labels=unverified_labels,
+        story=story or None,
         screen_links=screen_links,
         image_attachments=image_attachments,
     )
@@ -314,6 +320,8 @@ def build_forward_text(message: discord.Message, parsed: ParsedSubmission) -> st
         f"Participants: {participant_mentions}",
         f"Posted by: {message.author.mention}",
     ]
+    if parsed.story:
+        lines.append(f"Story: {parsed.story}")
     if parsed.screen_links:
         lines.append("Screens: " + " ".join(parsed.screen_links))
     return "\n".join(lines)
@@ -336,6 +344,7 @@ async def deny_submission(message: discord.Message, reason: str) -> None:
             "Activity Type: Patrol or RP\n"
             "Date: DD/MM/YYYY\n"
             "Participants: use real Discord mentions such as <@user>\n"
+            "Story: optional, RP only\n"
             "Screens: https://example.com/screen.png\n"
             "Or attach 1-4 screenshots to the message."
         )

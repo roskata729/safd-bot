@@ -470,6 +470,7 @@ Link-based example:
 Activity Type: RP
 Date: 15/03/2026
 Participants: @Roskou
+Story: Fire extinguished successfully without incidents.
 Screens: https://example.com/screenshot.png
 ```
 
@@ -482,6 +483,16 @@ Participants: @Roskou validName
 Screens:
 ```
 
+RP with optional story:
+
+```text
+Activity Type: RP
+Date: 17/03/2026
+Participants: @Roskou
+Story: Responded to a civilian disturbance and completed a formal warning.
+Screens:
+```
+
 ## Validation Rules
 
 The bot checks the following before approving a post:
@@ -489,6 +500,7 @@ The bot checks the following before approving a post:
 - `Activity Type:` must be `Patrol` or `RP`
 - `Date:` must be in `DD/MM/YYYY`
 - `Participants:` must contain at least one value
+- `Story:` is optional and only allowed when `Activity Type:` is `RP`
 - Every real Discord mention must point to a member that exists in the source server
 - Duplicate participants are rejected
 - Attachments must all be image files
