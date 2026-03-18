@@ -190,12 +190,26 @@ def parse_submission_body(message: discord.Message) -> ParsedSubmission:
 
     lines = [line.strip() for line in message.content.splitlines() if line.strip()]
     fields: dict[str, str] = {}
+    allowed_field_names = {"activity type", "date", "participants", "story", "screens"}
+    current_key: str | None = None
+    current_value_lines: list[str] = []
 
     for line in lines:
-        if ":" not in line:
+        potential_key, separator, potential_value = line.partition(":")
+        normalized_key = potential_key.strip().lower()
+
+        if separator and normalized_key in allowed_field_names:
+            if current_key is not None:
+                fields[current_key] = "\n".join(current_value_lines).strip()
+            current_key = normalized_key
+            current_value_lines = [potential_value.strip()]
             continue
-        key, value = line.split(":", 1)
-        fields[key.strip().lower()] = value.strip()
+
+        if current_key is not None:
+            current_value_lines.append(line)
+
+    if current_key is not None:
+        fields[current_key] = "\n".join(current_value_lines).strip()
 
     activity_type_raw = fields.get("activity type")
     if not activity_type_raw:
@@ -321,7 +335,10 @@ def build_forward_text(message: discord.Message, parsed: ParsedSubmission) -> st
         f"Posted by: {message.author.mention}",
     ]
     if parsed.story:
-        lines.append(f"Story: {parsed.story}")
+        story_lines = parsed.story.splitlines()
+        if story_lines:
+            lines.append(f"Story: {story_lines[0]}")
+            lines.extend(story_lines[1:])
     if parsed.screen_links:
         lines.append("Screens: " + " ".join(parsed.screen_links))
     return "\n".join(lines)
