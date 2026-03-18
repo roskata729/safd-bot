@@ -505,7 +505,7 @@ The bot checks the following before approving a post:
 - Duplicate participants are rejected
 - Attachments must all be image files
 - Maximum `4` screenshots per post
-- A post must contain either screenshots or links, not both
+- A post must contain either screenshots or links, not both.
 - If using `Screens:`, every value there must be a valid `http://` or `https://` link
 
 If a participant is written in plain text instead of as a real Discord mention:
