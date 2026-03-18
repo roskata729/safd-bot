@@ -489,7 +489,7 @@ RP with optional story:
 Activity Type: RP
 Date: 17/03/2026
 Participants: @Roskou
-Story: Responsed to a fire
+Story: Responsed to a fire and everything ended without accidents.
 Screens:
 ```
 
