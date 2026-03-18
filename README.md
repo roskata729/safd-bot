@@ -244,9 +244,13 @@ If your service name is different, update that line to match `BOT_SERVICE_NAME`.
 Each pushed commit is posted like this:
 
 ```text
-Add Google Cloud deployment setup
-97ba87d by Roskou
-https://github.com/roskata729/safd-bot/commit/...
+Title: Add Google Cloud deployment setup
+Commit: 97ba87d
+Author: Roskou
+Branch: main
+Repository: roskata729/safd-bot
+Pushed: full Discord timestamp + relative time
+Link: https://github.com/roskata729/safd-bot/commit/...
 ```
 
 ## Oracle Cloud Deployment
@@ -458,7 +462,7 @@ Users must post in the source channel using this structure:
 ```text
 Activity Type: Patrol
 Date: 15/03/2026
-Participants: @Roskou @HunterHL
+Participants: @Roskou @Infinity
 Screens:
 ```
 

@@ -54,6 +54,7 @@ def build_commit_entries(payload: dict) -> list[dict[str, str]]:
                 "message": message,
                 "url": item.get("url", ""),
                 "author": item.get("author", {}).get("name", "Unknown"),
+                "timestamp": item.get("timestamp", ""),
             }
         )
     return commits

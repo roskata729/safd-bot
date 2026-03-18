@@ -5,7 +5,7 @@ import os
 import re
 import sqlite3
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Iterable
 
@@ -610,6 +610,44 @@ def load_pending_changelog() -> list[dict[str, str]]:
     return commits if isinstance(commits, list) else []
 
 
+def parse_commit_timestamp(timestamp_text: str | None) -> datetime | None:
+    if not timestamp_text:
+        return None
+    try:
+        return datetime.strptime(timestamp_text, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+    except ValueError:
+        return None
+
+
+def build_changelog_embed(commit: dict[str, str]) -> discord.Embed:
+    title = commit["message"]
+    if len(title) > 256:
+        title = title[:253] + "..."
+
+    embed = discord.Embed(
+        title=title,
+        url=commit["url"],
+        color=discord.Color.blue(),
+    )
+    embed.add_field(name="Commit", value=f"`{commit['short_sha']}`", inline=True)
+    embed.add_field(name="Author", value=commit["author"], inline=True)
+    embed.add_field(name="Branch", value=GITHUB_BRANCH, inline=True)
+    embed.add_field(name="Repository", value=GITHUB_REPOSITORY or "Unknown", inline=False)
+
+    committed_at = parse_commit_timestamp(commit.get("timestamp"))
+    if committed_at is not None:
+        unix_time = int(committed_at.timestamp())
+        embed.add_field(
+            name="Pushed",
+            value=f"<t:{unix_time}:F>\n<t:{unix_time}:R>",
+            inline=False,
+        )
+        embed.timestamp = committed_at
+
+    embed.set_footer(text="Bot changelog")
+    return embed
+
+
 async def post_pending_changelog() -> None:
     if CHANGELOG_CHANNEL_ID <= 0:
         return
@@ -620,11 +658,7 @@ async def post_pending_changelog() -> None:
 
     changelog_channel = await resolve_changelog_channel()
     for commit in commits:
-        await changelog_channel.send(
-            f"**{commit['message']}**\n"
-            f"`{commit['short_sha']}` by {commit['author']}\n"
-            f"{commit['url']}"
-        )
+        await changelog_channel.send(embed=build_changelog_embed(commit))
 
     PENDING_CHANGELOG_PATH.unlink(missing_ok=True)
 
