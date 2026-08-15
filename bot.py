@@ -41,8 +41,8 @@ MEMBER_ROLES_IN_ORDER = [
     "Captain",
     "Lieutenant",
     "Engineer",
-    "Firefigther",
-    "Probationary Firefighter",
+    "Firefighter",
+    "Probationary FF",
 ]
 GITHUB_REPOSITORY = os.getenv("GITHUB_REPOSITORY", "").strip()
 GITHUB_BRANCH = os.getenv("GITHUB_BRANCH", "main").strip() or "main"
@@ -471,16 +471,13 @@ async def resolve_roster_channel() -> discord.TextChannel | discord.Thread:
 def build_single_role_roster(guild: discord.Guild, role_name: str) -> str | None:
     role = discord.utils.get(guild.roles, name=role_name)
     if role is None:
-        return None
+        return f"**{role_name} - 0**"
 
     role_members = [
         member.display_name
         for member in guild.members
         if not member.bot and role in member.roles
     ]
-    if not role_members:
-        return None
-
     role_members.sort(key=str.casefold)
     lines = [f"**{role.name} - {len(role_members)}**", *role_members]
     return "\n".join(lines)
