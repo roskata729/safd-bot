@@ -30,6 +30,20 @@ TARGET_TEXT_CHANNEL_ID = int(os.getenv("TARGET_TEXT_CHANNEL_ID", "0"))
 MANAGEMENT_CHANNEL_ID = int(os.getenv("MANAGEMENT_CHANNEL_ID", "0"))
 CHANGELOG_CHANNEL_ID = int(os.getenv("CHANGELOG_CHANNEL_ID", "0"))
 ROSTER_CHANNEL_ID = 1231717204530298961
+HQ_ROLES_IN_ORDER = [
+    "Chief",
+    "Assistant Chief",
+    "Head of BC",
+    "Supervisor",
+]
+MEMBER_ROLES_IN_ORDER = [
+    "Battalion Chief",
+    "Captain",
+    "Lieutenant",
+    "Engineer",
+    "Firefigther",
+    "Probationary Firefighter",
+]
 GITHUB_REPOSITORY = os.getenv("GITHUB_REPOSITORY", "").strip()
 GITHUB_BRANCH = os.getenv("GITHUB_BRANCH", "main").strip() or "main"
 COMMAND_PREFIX = os.getenv("COMMAND_PREFIX", "!")
@@ -454,23 +468,43 @@ async def resolve_roster_channel() -> discord.TextChannel | discord.Thread:
     raise RuntimeError("Roster channel is not a text channel or thread.")
 
 
+def build_single_role_roster(guild: discord.Guild, role_name: str) -> str | None:
+    role = discord.utils.get(guild.roles, name=role_name)
+    if role is None:
+        return None
+
+    role_members = [
+        member.display_name
+        for member in guild.members
+        if not member.bot and role in member.roles
+    ]
+    if not role_members:
+        return None
+
+    role_members.sort(key=str.casefold)
+    lines = [f"**{role.name} - {len(role_members)}**", *role_members]
+    return "\n".join(lines)
+
+
 def build_roster_messages(guild: discord.Guild) -> list[str]:
     messages: list[str] = []
-    for role in sorted(guild.roles, key=lambda item: item.position, reverse=True):
-        if role.is_default():
-            continue
 
-        role_members = [
-            member.display_name
-            for member in guild.members
-            if not member.bot and role in member.roles
-        ]
-        if not role_members:
-            continue
+    hq_entries = [
+        roster_text
+        for role_name in HQ_ROLES_IN_ORDER
+        if (roster_text := build_single_role_roster(guild, role_name)) is not None
+    ]
+    if hq_entries:
+        messages.append("\n\n".join(["**HQ Team**", *hq_entries]))
 
-        role_members.sort(key=str.casefold)
-        lines = [role.name, *role_members]
-        messages.append("\n".join(lines))
+    member_entries = [
+        roster_text
+        for role_name in MEMBER_ROLES_IN_ORDER
+        if (roster_text := build_single_role_roster(guild, role_name)) is not None
+    ]
+    if member_entries:
+        messages.append("\n\n".join(["**Members**", *member_entries]))
+
     return messages
 
 
