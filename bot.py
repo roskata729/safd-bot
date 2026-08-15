@@ -471,7 +471,7 @@ async def resolve_roster_channel() -> discord.TextChannel | discord.Thread:
 def build_single_role_roster(guild: discord.Guild, role_name: str) -> str | None:
     role = discord.utils.get(guild.roles, name=role_name)
     if role is None:
-        return f"**{role_name} - 0**"
+        return f"**• {role_name} — 0**\n▫️ _No members assigned_"
 
     role_members = [
         member.display_name
@@ -479,7 +479,11 @@ def build_single_role_roster(guild: discord.Guild, role_name: str) -> str | None
         if not member.bot and role in member.roles
     ]
     role_members.sort(key=str.casefold)
-    lines = [f"**{role.name} - {len(role_members)}**", *role_members]
+    if role_members:
+        member_lines = [f"👤 {member_name}" for member_name in role_members]
+    else:
+        member_lines = ["▫️ _No members assigned_"]
+    lines = [f"**• {role.name} — {len(role_members)}**", *member_lines]
     return "\n".join(lines)
 
 
@@ -492,7 +496,7 @@ def build_roster_messages(guild: discord.Guild) -> list[str]:
         if (roster_text := build_single_role_roster(guild, role_name)) is not None
     ]
     if hq_entries:
-        messages.append("\n\n".join(["**HQ Team**", *hq_entries]))
+        messages.append("\n\n".join(["## **🏢 HQ Team**", *hq_entries]))
 
     member_entries = [
         roster_text
@@ -500,7 +504,7 @@ def build_roster_messages(guild: discord.Guild) -> list[str]:
         if (roster_text := build_single_role_roster(guild, role_name)) is not None
     ]
     if member_entries:
-        messages.append("\n\n".join(["**Members**", *member_entries]))
+        messages.append("\n\n".join(["## **🚒 Members**", *member_entries]))
 
     return messages
 
