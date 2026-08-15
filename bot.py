@@ -12,7 +12,7 @@ from typing import Iterable
 import discord
 from discord.ext import commands, tasks
 from dotenv import load_dotenv
-from PIL import Image
+from PIL import Image, ImageDraw, ImageFont
 
 
 load_dotenv()
@@ -359,6 +359,31 @@ def build_forward_text(message: discord.Message, parsed: ParsedSubmission) -> st
     return "\n".join(lines)
 
 
+def build_activity_embed(message: discord.Message, parsed: ParsedSubmission) -> discord.Embed:
+    participant_mentions = " ".join(participant.output_text for participant in parsed.participants)
+    embed = discord.Embed(
+        title="SAFD Activity Report",
+        description=(
+            f"**Report ID:** `{message.id}`\n"
+            f"[Jump to original message]({message.jump_url})"
+        ),
+        color=discord.Color.from_rgb(191, 62, 47),
+    )
+    embed.add_field(name="Date", value=parsed.date_text, inline=True)
+    embed.add_field(name="Type of activity", value=parsed.activity_type, inline=True)
+    embed.add_field(name="Participants", value=participant_mentions, inline=False)
+    embed.add_field(name="Submitted by", value=message.author.mention, inline=False)
+    if parsed.story:
+        embed.add_field(name="Story", value=parsed.story[:1024], inline=False)
+    if parsed.screen_links:
+        embed.add_field(name="Screens", value="\n".join(parsed.screen_links), inline=False)
+    embed.set_footer(text=f"Submitted by {message.author.display_name}")
+    embed.timestamp = message.created_at
+    if message.author.display_avatar:
+        embed.set_thumbnail(url=message.author.display_avatar.url)
+    return embed
+
+
 async def add_reaction_safely(message: discord.Message, emoji: str) -> None:
     try:
         await message.add_reaction(emoji)
@@ -551,16 +576,15 @@ async def refresh_roster_posts() -> None:
 
 async def forward_submission(parsed: ParsedSubmission, message: discord.Message) -> None:
     target_channel = await resolve_target_channel()
-
-    if HEADER_IMAGE_PATH.exists():
-        await target_channel.send(file=discord.File(HEADER_IMAGE_PATH))
+    embed = build_activity_embed(message, parsed)
 
     if parsed.image_attachments:
         merged_file = await build_combined_image_file(parsed.image_attachments)
-        await target_channel.send(build_forward_text(message, parsed), file=merged_file)
+        embed.set_image(url=f"attachment://{merged_file.filename}")
+        await target_channel.send(embed=embed, file=merged_file)
         return
 
-    await target_channel.send(build_forward_text(message, parsed))
+    await target_channel.send(embed=embed)
 
 
 async def build_combined_image_file(
@@ -584,20 +608,43 @@ async def build_combined_image_file(
 
 def create_image_collage(images: list[Image.Image]) -> Image.Image:
     if len(images) == 1:
-        return images[0].copy()
+        single = images[0].copy()
+        return decorate_collage([single], cols=1, rows=1)
 
     cell_width = 1200
     cell_height = 675
-    padding = 20
+    padding = 24
 
     if len(images) == 2:
-        cols, rows = 1, 2
+        cols, rows = 2, 1
     else:
         cols, rows = 2, 2
+    return decorate_collage(images, cols=cols, rows=rows, cell_width=cell_width, cell_height=cell_height, padding=padding)
 
+
+def decorate_collage(
+    images: list[Image.Image],
+    cols: int,
+    rows: int,
+    cell_width: int = 1200,
+    cell_height: int = 675,
+    padding: int = 24,
+) -> Image.Image:
+    header_height = 76
     canvas_width = padding + cols * cell_width + (cols - 1) * padding + padding
-    canvas_height = padding + rows * cell_height + (rows - 1) * padding + padding
-    canvas = Image.new("RGB", (canvas_width, canvas_height), color=(28, 28, 28))
+    canvas_height = header_height + padding + rows * cell_height + (rows - 1) * padding + padding
+    canvas = Image.new("RGB", (canvas_width, canvas_height), color=(20, 24, 30))
+    draw = ImageDraw.Draw(canvas)
+    font = ImageFont.load_default()
+
+    draw.rounded_rectangle(
+        (padding, 16, canvas_width - padding, 16 + header_height - 20),
+        radius=18,
+        fill=(28, 38, 48),
+        outline=(49, 208, 136),
+        width=3,
+    )
+    draw.text((padding + 24, 28), "SAFD Combined Evidence", fill=(240, 244, 248), font=font)
 
     for index, image in enumerate(images):
         if len(images) == 3 and index == 2:
@@ -607,11 +654,25 @@ def create_image_collage(images: list[Image.Image]) -> Image.Image:
             row = index // cols
             col = index % cols
             x = padding + col * (cell_width + padding)
-        y = padding + row * (cell_height + padding)
+        y = header_height + padding + row * (cell_height + padding)
+        draw.rounded_rectangle(
+            (x - 4, y - 4, x + cell_width + 4, y + cell_height + 4),
+            radius=16,
+            fill=(17, 22, 28),
+            outline=(38, 160, 112),
+            width=3,
+        )
         fitted = fit_image_to_box(image, cell_width, cell_height)
         paste_x = x + (cell_width - fitted.width) // 2
         paste_y = y + (cell_height - fitted.height) // 2
         canvas.paste(fitted, (paste_x, paste_y))
+        label = f"Screenshot #{index + 1}"
+        draw.rounded_rectangle(
+            (x + 14, y + 14, x + 14 + 180, y + 14 + 34),
+            radius=10,
+            fill=(23, 52, 70),
+        )
+        draw.text((x + 28, y + 24), label, fill=(240, 244, 248), font=font)
         fitted.close()
 
     return canvas
