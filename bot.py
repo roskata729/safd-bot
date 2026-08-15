@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Iterable
 
 import discord
-from discord.ext import commands
+from discord.ext import commands, tasks
 from dotenv import load_dotenv
 from PIL import Image
 
@@ -29,6 +29,7 @@ SOURCE_TEXT_CHANNEL_ID = int(os.getenv("SOURCE_TEXT_CHANNEL_ID", "0"))
 TARGET_TEXT_CHANNEL_ID = int(os.getenv("TARGET_TEXT_CHANNEL_ID", "0"))
 MANAGEMENT_CHANNEL_ID = int(os.getenv("MANAGEMENT_CHANNEL_ID", "0"))
 CHANGELOG_CHANNEL_ID = int(os.getenv("CHANGELOG_CHANNEL_ID", "0"))
+ROSTER_CHANNEL_ID = 1231717204530298961
 GITHUB_REPOSITORY = os.getenv("GITHUB_REPOSITORY", "").strip()
 GITHUB_BRANCH = os.getenv("GITHUB_BRANCH", "main").strip() or "main"
 COMMAND_PREFIX = os.getenv("COMMAND_PREFIX", "!")
@@ -435,6 +436,84 @@ async def resolve_changelog_channel() -> discord.TextChannel | discord.Thread:
     )
 
 
+async def resolve_roster_channel() -> discord.TextChannel | discord.Thread:
+    target_channel = bot.get_channel(ROSTER_CHANNEL_ID)
+    if isinstance(target_channel, (discord.TextChannel, discord.Thread)):
+        return target_channel
+
+    try:
+        fetched_channel = await bot.fetch_channel(ROSTER_CHANNEL_ID)
+    except discord.HTTPException as exc:
+        raise RuntimeError(
+            "Roster channel could not be fetched. Check the channel ID and bot access."
+        ) from exc
+
+    if isinstance(fetched_channel, (discord.TextChannel, discord.Thread)):
+        return fetched_channel
+
+    raise RuntimeError("Roster channel is not a text channel or thread.")
+
+
+def build_roster_messages(guild: discord.Guild) -> list[str]:
+    messages: list[str] = []
+    for role in sorted(guild.roles, key=lambda item: item.position, reverse=True):
+        if role.is_default():
+            continue
+
+        role_members = [
+            member.display_name
+            for member in guild.members
+            if not member.bot and role in member.roles
+        ]
+        if not role_members:
+            continue
+
+        role_members.sort(key=str.casefold)
+        lines = [role.name, *role_members]
+        messages.append("\n".join(lines))
+    return messages
+
+
+async def clear_previous_roster_posts(channel: discord.TextChannel | discord.Thread) -> None:
+    stored_message_ids = get_state_value("roster_message_ids")
+    if not stored_message_ids:
+        return
+
+    try:
+        message_ids = json.loads(stored_message_ids)
+    except json.JSONDecodeError:
+        message_ids = []
+
+    if not isinstance(message_ids, list):
+        return
+
+    for message_id in message_ids:
+        try:
+            message = await channel.fetch_message(int(message_id))
+        except (discord.HTTPException, ValueError):
+            continue
+        if bot.user is None or message.author.id != bot.user.id:
+            continue
+        try:
+            await message.delete()
+        except discord.HTTPException:
+            continue
+
+
+async def refresh_roster_posts() -> None:
+    roster_channel = await resolve_roster_channel()
+    guild = roster_channel.guild
+
+    await clear_previous_roster_posts(roster_channel)
+
+    message_ids: list[int] = []
+    for content in build_roster_messages(guild):
+        posted_message = await roster_channel.send(content)
+        message_ids.append(posted_message.id)
+
+    set_state_value("roster_message_ids", json.dumps(message_ids))
+
+
 async def forward_submission(parsed: ParsedSubmission, message: discord.Message) -> None:
     target_channel = await resolve_target_channel()
 
@@ -680,6 +759,19 @@ async def post_pending_changelog() -> None:
     PENDING_CHANGELOG_PATH.unlink(missing_ok=True)
 
 
+@tasks.loop(hours=24)
+async def roster_refresh_loop() -> None:
+    try:
+        await refresh_roster_posts()
+    except Exception as exc:
+        print(f"Roster refresh error: {exc}")
+
+
+@roster_refresh_loop.before_loop
+async def before_roster_refresh_loop() -> None:
+    await bot.wait_until_ready()
+
+
 @bot.event
 async def on_ready() -> None:
     init_db()
@@ -687,6 +779,12 @@ async def on_ready() -> None:
         await post_pending_changelog()
     except Exception as exc:
         print(f"Changelog post error: {exc}")
+    try:
+        await refresh_roster_posts()
+    except Exception as exc:
+        print(f"Initial roster refresh error: {exc}")
+    if not roster_refresh_loop.is_running():
+        roster_refresh_loop.start()
     print(f"Logged in as {bot.user} ({bot.user.id})")
 
 
