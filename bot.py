@@ -786,6 +786,103 @@ async def build_stats_for_period(
     return "\n".join(lines)
 
 
+def find_member_by_name(guild: discord.Guild, raw_name: str) -> discord.Member | None:
+    lookup = raw_name.strip().casefold()
+    if not lookup:
+        return None
+
+    for member in guild.members:
+        display_name = member.display_name.casefold()
+        global_name = member.global_name.casefold() if member.global_name else None
+        username = member.name.casefold()
+        if lookup in {display_name, username, global_name}:
+            return member
+    return None
+
+
+async def get_last_activity_details(
+    guild: discord.Guild,
+    player_input: str,
+    mentioned_member: discord.Member | None = None,
+) -> str:
+    lookup_label = player_input.strip()
+    if not lookup_label:
+        raise ValueError("Provide a player mention or name.")
+
+    member = mentioned_member or find_member_by_name(guild, lookup_label)
+    async with db_lock:
+        with sqlite3.connect(DB_PATH) as connection:
+            if member is not None:
+                row = connection.execute(
+                    """
+                    SELECT participant_id,
+                           participant_label,
+                           activity_type,
+                           activity_date,
+                           author_id,
+                           channel_id,
+                           source_message_id,
+                           created_at
+                    FROM activity_submissions
+                    WHERE guild_id = ?
+                      AND (participant_id = ? OR participant_label = ? COLLATE NOCASE)
+                    ORDER BY activity_date DESC, created_at DESC, id DESC
+                    LIMIT 1
+                    """,
+                    (guild.id, member.id, lookup_label),
+                ).fetchone()
+            else:
+                row = connection.execute(
+                    """
+                    SELECT participant_id,
+                           participant_label,
+                           activity_type,
+                           activity_date,
+                           author_id,
+                           channel_id,
+                           source_message_id,
+                           created_at
+                    FROM activity_submissions
+                    WHERE guild_id = ?
+                      AND participant_label = ? COLLATE NOCASE
+                    ORDER BY activity_date DESC, created_at DESC, id DESC
+                    LIMIT 1
+                    """,
+                    (guild.id, lookup_label),
+                ).fetchone()
+
+    if row is None:
+        return f"No approved activities found for `{lookup_label}`."
+
+    (
+        participant_id,
+        participant_label,
+        activity_type,
+        activity_date,
+        author_id,
+        channel_id,
+        source_message_id,
+        created_at,
+    ) = row
+    participant_member = guild.get_member(participant_id) if participant_id is not None else None
+    author_member = guild.get_member(author_id)
+    display_name = participant_member.display_name if participant_member else participant_label
+    author_name = author_member.display_name if author_member else f"User {author_id}"
+    jump_url = (
+        f"https://discord.com/channels/{guild.id}/{channel_id}/{source_message_id}"
+    )
+
+    lines = [
+        f"Last approved activity for {display_name}",
+        f"Type: {activity_type}",
+        f"Date: {datetime.strptime(activity_date, '%Y-%m-%d').strftime('%d/%m/%Y')}",
+        f"Posted by: {author_name}",
+        f"Recorded at: {created_at}",
+        f"Original post: {jump_url}",
+    ]
+    return "\n".join(lines)
+
+
 async def build_monthly_stats(guild: discord.Guild, month: int, year: int) -> str:
     start_dt, end_dt = get_reporting_window(month, year)
     display_end = (end_dt - timedelta(days=1)).strftime("%d/%m/%Y")
@@ -1019,6 +1116,28 @@ async def show_monthly(
         now = datetime.utcnow()
         month_value, year_value = get_current_reporting_period(now)
         report = await build_monthly_stats(ctx.guild, month_value, year_value)
+    await ctx.reply(f"```text\n{report}\n```")
+
+
+@bot.command(name="lastactivity")
+async def last_activity(ctx: commands.Context, *, player: str | None = None) -> None:
+    if ctx.guild is None:
+        await ctx.reply("This command can only be used inside a server.")
+        return
+
+    if ctx.channel.id != MANAGEMENT_CHANNEL_ID:
+        await ctx.reply("This command can only be used in the management channel.")
+        return
+
+    if not player:
+        await ctx.reply(f"Use `{COMMAND_PREFIX}lastactivity @Player` or `{COMMAND_PREFIX}lastactivity PlayerName`.")
+        return
+
+    report = await get_last_activity_details(
+        ctx.guild,
+        player,
+        ctx.message.mentions[0] if ctx.message.mentions else None,
+    )
     await ctx.reply(f"```text\n{report}\n```")
 
 
