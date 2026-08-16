@@ -30,6 +30,7 @@ TARGET_TEXT_CHANNEL_ID = int(os.getenv("TARGET_TEXT_CHANNEL_ID", "0"))
 MANAGEMENT_CHANNEL_ID = int(os.getenv("MANAGEMENT_CHANNEL_ID", "0"))
 CHANGELOG_CHANNEL_ID = int(os.getenv("CHANGELOG_CHANNEL_ID", "0"))
 ROSTER_CHANNEL_ID = 1231717204530298961
+FIREFIGHTER_OF_THE_MONTH_ROLE_NAME = "Firefighter of the Month"
 HQ_ROLES_IN_ORDER = [
     "Chief",
     "Assistant Chief",
@@ -85,6 +86,51 @@ class PendingConfirmation:
     author_id: int
     source_channel_id: int
     parsed: ParsedSubmission
+
+
+@dataclass(frozen=True)
+class PromotionRule:
+    current_role: str
+    next_role: str
+    required_activities: int
+    display_current_role: str | None = None
+    display_next_role: str | None = None
+    extra_note: str | None = None
+
+    @property
+    def current_label(self) -> str:
+        return self.display_current_role or self.current_role
+
+    @property
+    def next_label(self) -> str:
+        return self.display_next_role or self.next_role
+
+
+PROMOTION_RULES = [
+    PromotionRule(
+        current_role="Probationary FF",
+        next_role="Firefighter",
+        required_activities=1,
+        display_current_role="Probationary Firefighter",
+    ),
+    PromotionRule(
+        current_role="Firefighter",
+        next_role="Engineer",
+        required_activities=5,
+    ),
+    PromotionRule(
+        current_role="Engineer",
+        next_role="Lieutenant",
+        required_activities=10,
+    ),
+    PromotionRule(
+        current_role="Lieutenant",
+        next_role="Captain",
+        required_activities=15,
+    ),
+]
+PROMOTION_RULE_BY_ROLE = {rule.current_role: rule for rule in PROMOTION_RULES}
+PROMOTION_ROLE_ORDER = [rule.current_role for rule in PROMOTION_RULES]
 
 
 def init_db() -> None:
@@ -786,6 +832,209 @@ async def build_stats_for_period(
     return "\n".join(lines)
 
 
+async def get_activity_totals_for_period(
+    guild_id: int,
+    start_dt: datetime,
+    end_dt_exclusive: datetime,
+) -> dict[int, int]:
+    start = start_dt.strftime("%Y-%m-%d")
+    end = end_dt_exclusive.strftime("%Y-%m-%d")
+    async with db_lock:
+        with sqlite3.connect(DB_PATH) as connection:
+            rows = connection.execute(
+                """
+                SELECT participant_id, COUNT(*) AS total
+                FROM activity_submissions
+                WHERE guild_id = ?
+                  AND participant_id IS NOT NULL
+                  AND activity_date >= ?
+                  AND activity_date < ?
+                GROUP BY participant_id
+                """,
+                (guild_id, start, end),
+            ).fetchall()
+    return {participant_id: total for participant_id, total in rows}
+
+
+def get_reporting_period_key(date_value: datetime) -> tuple[int, int]:
+    if date_value.day >= 28:
+        next_month_anchor = (date_value.replace(day=28) + timedelta(days=4)).replace(day=1)
+        return next_month_anchor.month, next_month_anchor.year
+    return date_value.month, date_value.year
+
+
+def get_reporting_period_label(month: int, year: int) -> str:
+    start_dt, end_dt = get_reporting_window(month, year)
+    display_end = (end_dt - timedelta(days=1)).strftime("%d/%m/%Y")
+    return f"{start_dt.strftime('%d/%m/%Y')} - {display_end}"
+
+
+async def get_all_activity_rows(
+    guild_id: int,
+) -> list[tuple[int, str, str]]:
+    async with db_lock:
+        with sqlite3.connect(DB_PATH) as connection:
+            rows = connection.execute(
+                """
+                SELECT participant_id, participant_label, activity_date
+                FROM activity_submissions
+                WHERE guild_id = ?
+                  AND participant_id IS NOT NULL
+                """,
+                (guild_id,),
+            ).fetchall()
+    return rows
+
+
+def resolve_member_name(
+    guild: discord.Guild,
+    member_id: int,
+    fallback_names: dict[int, str],
+) -> str:
+    member = guild.get_member(member_id)
+    if member is not None:
+        return member.display_name
+    return fallback_names.get(member_id, f"User {member_id}")
+
+
+async def build_firefighter_of_the_month_sections(
+    guild: discord.Guild,
+    current_period_key: tuple[int, int],
+) -> tuple[list[str], list[str]]:
+    rows = await get_all_activity_rows(guild.id)
+    if not rows:
+        return ["- No approved activities found yet."], ["- No historical winners yet."]
+
+    current_period_totals: dict[int, int] = {}
+    historical_period_totals: dict[tuple[int, int], dict[int, int]] = {}
+    fallback_names: dict[int, str] = {}
+
+    for participant_id, participant_label, activity_date in rows:
+        parsed_date = datetime.strptime(activity_date, "%Y-%m-%d")
+        period_key = get_reporting_period_key(parsed_date)
+        fallback_names[participant_id] = participant_label
+
+        if period_key == current_period_key:
+            current_period_totals[participant_id] = current_period_totals.get(participant_id, 0) + 1
+            continue
+
+        period_bucket = historical_period_totals.setdefault(period_key, {})
+        period_bucket[participant_id] = period_bucket.get(participant_id, 0) + 1
+
+    current_leader_lines: list[str] = []
+    if current_period_totals:
+        top_total = max(current_period_totals.values())
+        leader_ids = sorted(
+            [member_id for member_id, total in current_period_totals.items() if total == top_total],
+            key=lambda member_id: resolve_member_name(guild, member_id, fallback_names).casefold(),
+        )
+        current_leader_lines = [
+            f"- {resolve_member_name(guild, member_id, fallback_names)}: {top_total} activities, current leader for `{FIREFIGHTER_OF_THE_MONTH_ROLE_NAME}`"
+            for member_id in leader_ids
+        ]
+    else:
+        current_leader_lines = ["- No approved activities yet in the current reporting period."]
+
+    firefighter_title_counts: dict[int, int] = {}
+    for period_totals in historical_period_totals.values():
+        if not period_totals:
+            continue
+        top_total = max(period_totals.values())
+        for member_id, total in period_totals.items():
+            if total == top_total:
+                firefighter_title_counts[member_id] = firefighter_title_counts.get(member_id, 0) + 1
+
+    historical_lines: list[str] = []
+    if firefighter_title_counts:
+        sorted_counts = sorted(
+            firefighter_title_counts.items(),
+            key=lambda item: (-item[1], resolve_member_name(guild, item[0], fallback_names).casefold()),
+        )
+        historical_lines = [
+            f"- {resolve_member_name(guild, member_id, fallback_names)}: {count} time(s)"
+            for member_id, count in sorted_counts
+        ]
+    else:
+        historical_lines = ["- No historical winners yet."]
+
+    return current_leader_lines, historical_lines
+
+
+def get_member_promotion_rule(member: discord.Member) -> PromotionRule | None:
+    matched_rules = [
+        PROMOTION_RULE_BY_ROLE[role_name]
+        for role_name in PROMOTION_ROLE_ORDER
+        if discord.utils.get(member.roles, name=role_name) is not None
+    ]
+    if not matched_rules:
+        return None
+    return matched_rules[-1]
+
+
+async def build_promotion_report_for_current_period(guild: discord.Guild) -> str:
+    now = datetime.utcnow()
+    month_value, year_value = get_current_reporting_period(now)
+    start_dt, end_dt = get_reporting_window(month_value, year_value)
+    label = get_reporting_period_label(month_value, year_value)
+    totals_by_member = await get_activity_totals_for_period(guild.id, start_dt, end_dt)
+    current_leader_lines, historical_title_lines = await build_firefighter_of_the_month_sections(
+        guild,
+        (month_value, year_value),
+    )
+
+    eligible_lines: list[str] = []
+    not_ready_lines: list[str] = []
+
+    for member in guild.members:
+        if member.bot:
+            continue
+
+        rule = get_member_promotion_rule(member)
+        if rule is None:
+            continue
+
+        total = totals_by_member.get(member.id, 0)
+        summary = (
+            f"{member.display_name}: {rule.current_label} -> {rule.next_label}, "
+            f"Activities {total}/{rule.required_activities}"
+        )
+        if total >= rule.required_activities:
+            if rule.extra_note:
+                summary = f"{summary}. {rule.extra_note}"
+            eligible_lines.append(summary)
+        else:
+            remaining = rule.required_activities - total
+            not_ready_lines.append(f"{summary}, Needs {remaining} more")
+
+    if not eligible_lines and not not_ready_lines:
+        return f"No promotable members found for {label}."
+
+    lines = [
+        f"Promotion check for {label}",
+        "",
+        "Eligible now:",
+    ]
+
+    if eligible_lines:
+        lines.extend(f"- {line}" for line in eligible_lines)
+    else:
+        lines.append("- No members are currently eligible.")
+
+    lines.extend(["", "Not eligible yet:"])
+    if not_ready_lines:
+        lines.extend(f"- {line}" for line in not_ready_lines)
+    else:
+        lines.append("- Everyone with a tracked rank currently meets the activity requirement.")
+
+    lines.extend(["", f"{FIREFIGHTER_OF_THE_MONTH_ROLE_NAME} leader:"])
+    lines.extend(current_leader_lines)
+
+    lines.extend(["", f"{FIREFIGHTER_OF_THE_MONTH_ROLE_NAME} history:"])
+    lines.extend(historical_title_lines)
+
+    return "\n".join(lines)
+
+
 def find_member_by_name(guild: discord.Guild, raw_name: str) -> discord.Member | None:
     lookup = raw_name.strip().casefold()
     if not lookup:
@@ -953,6 +1202,17 @@ def build_help_text() -> str:
         "The result includes type, date, author, recorded time, and a jump link to the original submission.",
         f"Examples: {COMMAND_PREFIX}lastactivity @Roskou",
         f"          {COMMAND_PREFIX}lastactivity Roskou",
+        "",
+        f"6. {COMMAND_PREFIX}promotioncheck",
+        "Shows who is eligible for promotion in the current reporting period.",
+        "The report uses the 28th to 27th month window and compares each member's current rank with the required monthly activity count.",
+        "Tracked promotions:",
+        "Probationary Firefighter -> Firefighter: 1 activity",
+        "Firefighter -> Engineer: 5 activities",
+        "Engineer -> Lieutenant: 10 activities",
+        "Lieutenant -> Captain: 15 activities",
+        "The report also shows the current leader for Firefighter of the Month and a historical count of past winners.",
+        f"Example: {COMMAND_PREFIX}promotioncheck",
         "",
         "NOTES",
         "Statistics only count approved activities.",
@@ -1255,6 +1515,20 @@ async def last_activity(ctx: commands.Context, *, player: str | None = None) -> 
         ctx.message.mentions[0] if ctx.message.mentions else None,
     )
     await ctx.reply(f"```text\n{report}\n```")
+
+
+@bot.command(name="promotioncheck")
+async def promotion_check(ctx: commands.Context) -> None:
+    if ctx.guild is None:
+        await ctx.reply("This command can only be used inside a server.")
+        return
+
+    if ctx.channel.id != MANAGEMENT_CHANNEL_ID:
+        await ctx.reply("This command can only be used in the management channel.")
+        return
+
+    report = await build_promotion_report_for_current_period(ctx.guild)
+    await reply_with_text_blocks(ctx, report)
 
 
 def validate_environment() -> Iterable[str]:
