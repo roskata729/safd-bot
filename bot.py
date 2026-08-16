@@ -883,6 +883,84 @@ async def get_last_activity_details(
     return "\n".join(lines)
 
 
+def build_help_text() -> str:
+    source_channel_hint = (
+        f"<#{SOURCE_TEXT_CHANNEL_ID}>" if SOURCE_TEXT_CHANNEL_ID > 0 else "the submission channel"
+    )
+    management_channel_hint = (
+        f"<#{MANAGEMENT_CHANNEL_ID}>" if MANAGEMENT_CHANNEL_ID > 0 else "the management channel"
+    )
+
+    sections = [
+        f"{COMMAND_PREFIX}help",
+        "",
+        "Shows this help message with commands, parameters, rules, and examples.",
+        "",
+        "SUBMISSION FORMAT",
+        f"Post activity submissions in {source_channel_hint} using this format:",
+        "Activity Type: Patrol or RP",
+        "Date: DD/MM/YYYY",
+        "Participants: @User1 @User2",
+        "Story: Optional, only for RP",
+        "Screens: leave blank if attaching images, or add one link",
+        "",
+        "SUBMISSION RULES",
+        "Activity Type must be Patrol or RP.",
+        "Date must use DD/MM/YYYY.",
+        "At least 1 participant is required.",
+        "Participants can be tagged with @ or written as plain text.",
+        "If a plain-text participant is used, the bot warns the author and waits for a ✅ confirmation.",
+        "Tagged participants must exist in the server.",
+        "Use either 1 link or 1 to 4 screenshots.",
+        "If everything is valid, the bot reacts with ✅.",
+        "If something is wrong, the bot reacts with 🔴 and sends a DM with the reason.",
+        "",
+        "EXAMPLE SUBMISSIONS",
+        "Example 1:",
+        "Activity Type: Patrol",
+        "Date: 16/08/2026",
+        "Participants: @Roskou @Infinity",
+        "Screens:",
+        "",
+        "Example 2:",
+        "Activity Type: RP",
+        "Date: 16/08/2026",
+        "Participants: @Roskou validName",
+        "Story: Training session at the station, equipment checks, and cleanup after callout.",
+        "Screens: https://imgur.com/a/example",
+        "",
+        "MANAGEMENT COMMANDS",
+        f"These commands can only be used in {management_channel_hint}.",
+        "",
+        f"1. {COMMAND_PREFIX}showmonthly",
+        "Shows activity totals for the current reporting period.",
+        "Current reporting months run from the 28th of one month to the 27th of the next month.",
+        f"Example: {COMMAND_PREFIX}showmonthly",
+        "",
+        f"2. {COMMAND_PREFIX}showmonthly MM/YYYY",
+        "Shows activity totals for the selected reporting month.",
+        "Important: MM/YYYY means the month whose period ends in that month.",
+        "Example: 03/2026 means 28/02/2026 to 27/03/2026.",
+        f"Example command: {COMMAND_PREFIX}showmonthly 03/2026",
+        "",
+        f"3. {COMMAND_PREFIX}showmonthly DD/MM/YYYY DD/MM/YYYY",
+        "Shows activity totals for an exact custom date range.",
+        f"Example: {COMMAND_PREFIX}showmonthly 01/08/2026 15/08/2026",
+        "",
+        f"4. {COMMAND_PREFIX}lastactivity @Player",
+        f"5. {COMMAND_PREFIX}lastactivity PlayerName",
+        "Shows the latest approved activity for the selected player.",
+        "The result includes type, date, author, recorded time, and a jump link to the original submission.",
+        f"Examples: {COMMAND_PREFIX}lastactivity @Roskou",
+        f"          {COMMAND_PREFIX}lastactivity Roskou",
+        "",
+        "NOTES",
+        "Statistics only count approved activities.",
+        "Roster posts and changelog posts are automatic and do not need commands.",
+    ]
+    return "\n".join(sections)
+
+
 async def build_monthly_stats(guild: discord.Guild, month: int, year: int) -> str:
     start_dt, end_dt = get_reporting_window(month, year)
     display_end = (end_dt - timedelta(days=1)).strftime("%d/%m/%Y")
@@ -1117,6 +1195,11 @@ async def show_monthly(
         month_value, year_value = get_current_reporting_period(now)
         report = await build_monthly_stats(ctx.guild, month_value, year_value)
     await ctx.reply(f"```text\n{report}\n```")
+
+
+@bot.command(name="help")
+async def help_command(ctx: commands.Context) -> None:
+    await ctx.reply(f"```text\n{build_help_text()}\n```")
 
 
 @bot.command(name="lastactivity")
