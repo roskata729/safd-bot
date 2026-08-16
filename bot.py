@@ -994,6 +994,8 @@ async def build_promotion_report_for_current_period(guild: discord.Guild) -> str
             continue
 
         total = totals_by_member.get(member.id, 0)
+        if total <= 0:
+            continue
         summary = (
             f"{member.display_name}: {rule.current_label} -> {rule.next_label}, "
             f"Activities {total}/{rule.required_activities}"
