@@ -961,6 +961,39 @@ def build_help_text() -> str:
     return "\n".join(sections)
 
 
+async def reply_with_text_blocks(
+    ctx: commands.Context,
+    text: str,
+    *,
+    block_type: str = "text",
+    max_length: int = 1900,
+) -> None:
+    lines = text.splitlines()
+    chunks: list[str] = []
+    current_chunk: list[str] = []
+    current_length = 0
+
+    for line in lines:
+        line_length = len(line) + 1
+        if current_chunk and current_length + line_length > max_length:
+            chunks.append("\n".join(current_chunk))
+            current_chunk = [line]
+            current_length = line_length
+        else:
+            current_chunk.append(line)
+            current_length += line_length
+
+    if current_chunk:
+        chunks.append("\n".join(current_chunk))
+
+    for index, chunk in enumerate(chunks):
+        wrapped = f"```{block_type}\n{chunk}\n```"
+        if index == 0:
+            await ctx.reply(wrapped)
+        else:
+            await ctx.send(wrapped)
+
+
 async def build_monthly_stats(guild: discord.Guild, month: int, year: int) -> str:
     start_dt, end_dt = get_reporting_window(month, year)
     display_end = (end_dt - timedelta(days=1)).strftime("%d/%m/%Y")
@@ -1199,7 +1232,7 @@ async def show_monthly(
 
 @bot.command(name="help")
 async def help_command(ctx: commands.Context) -> None:
-    await ctx.reply(f"```text\n{build_help_text()}\n```")
+    await reply_with_text_blocks(ctx, build_help_text())
 
 
 @bot.command(name="lastactivity")
